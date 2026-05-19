@@ -4,7 +4,7 @@ import trigger_module
 def main():
     frequency_hz = 5.0
     interval = 1.0 / frequency_hz
-    mode = "both"  # or "numpy", "normal"
+    mode = "normal"  # or "numpy", "normal"
 
     print(f"Starting periodic save at {frequency_hz} Hz (mode: {mode})")
     print("Press Ctrl+C to stop")

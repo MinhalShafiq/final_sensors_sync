@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Parallel Loop Control - Using parallel_trigger_module
-
-This version uses the compiled Python module for better performance.
-Falls back to direct pipe writing if module is not available.
-
-Usage:
-    python3 parallel_loop_control_with_module.py
-"""
 
 import time
 import sys
@@ -56,7 +47,7 @@ def main():
     interval = 1.0 / frequency_hz
 
     print("=" * 60)
-    print("Parallel Loop Control (with module support)")
+    print("Parallel Loop Control")
     print("=" * 60)
     print(f"Frequency: {frequency_hz} Hz")
     print(f"Mode: {mode}")

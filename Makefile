@@ -74,8 +74,24 @@ TRIGGER_OBJ = $(OBJ_DIR)/trigger_save.o
 PARALLEL_OBJ = $(OBJ_DIR)/parallel_main.o
 PARALLEL_TRIGGER_OBJ = $(OBJ_DIR)/parallel_save.o
 
+# --- Arms variant (additional, leaves originals untouched) ---
+ARMS_SOURCES = $(SRC_DIR)/multi_sensor_parallel_arms.cpp \
+               $(SRC_DIR)/theta_camera.cpp \
+               $(SRC_DIR)/intel_d405.cpp \
+               $(SRC_DIR)/livox_mid360.cpp \
+               $(SRC_DIR)/npy_writer.cpp \
+               $(SRC_DIR)/pcd_writer.cpp
+ARMS_OBJECTS = $(ARMS_SOURCES:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/arms_%.o)
+
+ARMS_TARGET = parallel_arms_recorder
+ARMS_MAIN = $(SRC_DIR)/parallel_main_arms.cpp
+ARMS_MAIN_OBJ = $(OBJ_DIR)/parallel_main_arms.o
+
+ARMS_PYTHON_MODULE = arms_trigger_module$(shell python3.10-config --extension-suffix)
+ARMS_PYTHON_MAIN = $(SRC_DIR)/arms_trigger_module.cpp
+
 # Default target
-all: $(DAEMON_TARGET) $(TRIGGER_TARGET) $(PARALLEL_TARGET) $(PARALLEL_TRIGGER_TARGET) python-module
+all: $(DAEMON_TARGET) $(TRIGGER_TARGET) $(PARALLEL_TARGET) $(PARALLEL_TRIGGER_TARGET) python-module $(ARMS_TARGET) arms-python-module
 
 # Build directories
 $(OBJ_DIR):
@@ -111,9 +127,29 @@ $(PARALLEL_PYTHON_MODULE): $(PARALLEL_PYTHON_MAIN) | $(OBJ_DIR)
 	@echo "Building Parallel Python module: $@..."
 	$(CXX) $(CXXFLAGS) -fPIC $(PYBIND11_CFLAGS) $(PYTHON_CFLAGS) $< -o $@ $(PYBIND11_LDFLAGS) $(PYTHON_LIBS)
 
-.PHONY: python-module python-parallel-module
+.PHONY: python-module python-parallel-module arms-python-module
 python-module: $(PYTHON_MODULE)
 python-parallel-module: $(PARALLEL_PYTHON_MODULE)
+arms-python-module: $(ARMS_PYTHON_MODULE)
+
+# Arms recorder executable
+$(ARMS_TARGET): $(ARMS_MAIN_OBJ) $(ARMS_OBJECTS) | $(OBJ_DIR)
+	@echo "Linking $@..."
+	$(CXX) $^ -o $@ $(ALL_LIBS)
+
+# Arms python module
+$(ARMS_PYTHON_MODULE): $(ARMS_PYTHON_MAIN) | $(OBJ_DIR)
+	@echo "Building Arms Python module: $@..."
+	$(CXX) $(CXXFLAGS) -fPIC $(PYBIND11_CFLAGS) $(PYTHON_CFLAGS) $< -o $@ $(PYBIND11_LDFLAGS) $(PYTHON_LIBS)
+
+# Arms object compilation (arms_ prefix to avoid conflicts with existing object files)
+$(OBJ_DIR)/arms_%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
+	@echo "Compiling $< (arms)..."
+	$(CXX) $(ALL_CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/parallel_main_arms.o: $(ARMS_MAIN) | $(OBJ_DIR)
+	@echo "Compiling $<..."
+	$(CXX) $(ALL_CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Compile core objects
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
@@ -144,7 +180,7 @@ $(OBJ_DIR)/parallel_%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
 
 # Clean
 clean:
-	rm -rf $(OBJ_DIR) $(DAEMON_TARGET) $(TRIGGER_TARGET) $(PARALLEL_TARGET) $(PARALLEL_TRIGGER_TARGET) $(PYTHON_MODULE) $(PARALLEL_PYTHON_MODULE)
+	rm -rf $(OBJ_DIR) $(DAEMON_TARGET) $(TRIGGER_TARGET) $(PARALLEL_TARGET) $(PARALLEL_TRIGGER_TARGET) $(PYTHON_MODULE) $(PARALLEL_PYTHON_MODULE) $(ARMS_TARGET) $(ARMS_PYTHON_MODULE)
 
 # Run
 run-daemon: $(DAEMON_TARGET)

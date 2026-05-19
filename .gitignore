@@ -1,0 +1,10 @@
+sync_daemon
+trigger_module*
+python_controller/trigger_module*
+session_*
+.vscode
+.claude
+build
+trigger_save
+parallel_recorder
+parallel_save
