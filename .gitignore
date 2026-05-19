@@ -8,3 +8,8 @@ build
 trigger_save
 parallel_recorder
 parallel_save
+parallel_arms_recorder
+arms_trigger_module*
+python_controller/arms_trigger_module*
+multi_sensor_parallel_arms_*/
+recorder.log

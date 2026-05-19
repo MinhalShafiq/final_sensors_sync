@@ -79,15 +79,14 @@ def enable_slave(piper):
     return False
 
 
-def read_arm_state(piper):
+def read_arm_state(piper, mg):
     """Return (master_arm_vec[8], slave_arm_vec[8]) as floats.
 
-    Vector layout: j1..j6 (millideg from SDK, kept as raw), grip_angle, grip_effort.
-    SDK values are passed through; downstream CSVs preserve raw counts so we don't
-    bake in unit assumptions here.
+    Vector layout: j1..j6 (raw SDK units), grip_angle, grip_effort. `mg` is the
+    already-fetched GetArmGripperCtrl().gripper_ctrl, passed in to avoid a
+    duplicate CAN-state read every loop.
     """
     mc = piper.GetArmJointCtrl().joint_ctrl
-    mg = piper.GetArmGripperCtrl().gripper_ctrl
     sj = piper.GetArmJointMsgs().joint_state
     sg = piper.GetArmGripperMsgs().gripper_state
 
@@ -185,9 +184,13 @@ def main():
     parser = argparse.ArgumentParser(description="Episode recorder for dual Piper + multi-sensor sync")
     parser.add_argument("--can", default="can0", help="CAN interface (default: can0)")
     parser.add_argument("--name", default="multi_sensor_parallel_arms",
-                        help="Base name (used for trigger pipe path)")
+                        help="Base name (must match parallel_arms_recorder's -n flag)")
     parser.add_argument("--out", default=None,
-                        help="Output directory (default: ./<name>_<timestamp> in repo root)")
+                        help="Where arm trajectory CSVs go. If --spawn, also passed to "
+                             "the recorder as -D. Default: ./<name>_<timestamp> in repo root.")
+    parser.add_argument("--spawn", action="store_true",
+                        help="Launch parallel_arms_recorder ourselves. Default: expect "
+                             "the recorder to already be running in another terminal.")
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -203,12 +206,30 @@ def main():
     print("============================================")
     print("  Episode Recorder")
     print("============================================")
-    print(f"  CAN bus:     {args.can}")
-    print(f"  Output:      {base_dir}")
+    print(f"  CAN bus:      {args.can}")
+    print(f"  Output:       {base_dir}")
     print(f"  Trigger pipe: {pipe_path}")
+    print(f"  Recorder:     {'spawn (self-managed)' if args.spawn else 'external (expected)'}")
     print("============================================\n")
 
-    # 1) Bring up piper
+    # 1) Handle the recorder: spawn or attach
+    recorder_proc = None
+    recorder_log_f = None
+    pipe_exists = pipe_path.exists()
+
+    if args.spawn:
+        if pipe_exists:
+            print(f"  ERROR: --spawn was given but pipe already exists at {pipe_path}.")
+            print("         An external recorder is already running. Drop --spawn or kill the other one.")
+            sys.exit(1)
+        print(f"  Starting parallel_arms_recorder (logs -> {recorder_log})...")
+        recorder_proc, recorder_log_f = spawn_recorder(base_dir, args.name, recorder_log)
+    else:
+        if not pipe_exists:
+            print(f"  Pipe {pipe_path} not found yet — waiting up to 60s.")
+            print(f"  Start in another terminal: ./parallel_arms_recorder -n {args.name} -D {base_dir}")
+
+    # 2) Bring up piper while the recorder warms up
     piper = C_PiperInterface_V2(args.can)
     piper.ConnectPort()
     time.sleep(2)
@@ -216,6 +237,9 @@ def main():
     if not enable_slave(piper):
         print("Failed to enable slave. Check connections and power.")
         piper.DisconnectPort()
+        if recorder_proc:
+            recorder_proc.terminate()
+            recorder_log_f.close()
         sys.exit(1)
 
     print("  Activating high-follow mode...")
@@ -224,17 +248,18 @@ def main():
         piper.EnableArm(7)
         time.sleep(0.05)
 
-    # 2) Spawn recorder subprocess (one-shot warmup)
-    print(f"\n  Starting parallel_arms_recorder (logs -> {recorder_log})...")
-    recorder_proc, recorder_log_f = spawn_recorder(base_dir, args.name, recorder_log)
-    print("  Waiting for recorder to come up...")
+    # 3) Make sure the pipe is up before we start triggering
     if not wait_for_pipe(pipe_path, timeout=60.0):
-        print(f"  ERROR: recorder did not create pipe within timeout. See {recorder_log}")
-        recorder_proc.terminate()
-        recorder_log_f.close()
+        print(f"  ERROR: trigger pipe never appeared at {pipe_path}.")
+        if recorder_proc:
+            print(f"         See recorder log: {recorder_log}")
+            recorder_proc.terminate()
+            recorder_log_f.close()
+        else:
+            print("         Is parallel_arms_recorder running? Check `-n` matches `--name`.")
         piper.DisconnectPort()
         sys.exit(1)
-    print("  Recorder ready.\n")
+    print("  Trigger pipe ready.\n")
 
     # 3) Episode state
     recording = False
@@ -292,25 +317,16 @@ def main():
                     piper.MotionCtrl_2(0x01, 0x01, 100, 0xAD)
                     piper.EnableArm(7)
 
-                # Gripper relay every loop (do not send GripperCtrl in the
-                # warmup phase because we just sent EnableArm — but at steady
-                # state this matches dual_piper.py).
-                try:
-                    mg = piper.GetArmGripperCtrl().gripper_ctrl
-                    grip_effort = mg.grippers_effort or 3000
-                    piper.GripperCtrl(abs(mg.grippers_angle), grip_effort, 0x01, 0)
-                except Exception as e:
-                    # Don't kill the loop if a single CAN read hiccups
-                    if loop_count % 200 == 0:
-                        print(f"  [warn] gripper relay: {e}")
+                # Gripper relay every loop — identical to dual_piper.py. No
+                # try/except: if the SDK raises here, we want a real traceback,
+                # not a silent slave that drifts.
+                mg = piper.GetArmGripperCtrl().gripper_ctrl
+                grip_effort = mg.grippers_effort or 3000
+                piper.GripperCtrl(abs(mg.grippers_angle), grip_effort, 0x01, 0)
 
-                # --- arm read ---
-                try:
-                    master, slave = read_arm_state(piper)
-                except Exception as e:
-                    if loop_count % 200 == 0:
-                        print(f"  [warn] arm read: {e}")
-                    master = slave = [0.0] * 8
+                # Reuse `mg` for the arm-state read so we don't poll the
+                # gripper control twice per loop.
+                master, slave = read_arm_state(piper, mg)
 
                 # --- high-rate arms log ---
                 if recording and arms_csv_f is not None:
@@ -360,18 +376,22 @@ def main():
         if recording:
             stop_episode()
 
-        print("\n  Stopping recorder...")
-        try:
-            os.killpg(os.getpgid(recorder_proc.pid), signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        try:
-            recorder_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            print("  Recorder didn't exit on SIGINT; sending SIGTERM.")
-            os.killpg(os.getpgid(recorder_proc.pid), signal.SIGTERM)
-            recorder_proc.wait(timeout=5)
-        recorder_log_f.close()
+        if recorder_proc is not None:
+            print("\n  Stopping recorder...")
+            try:
+                os.killpg(os.getpgid(recorder_proc.pid), signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            try:
+                recorder_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print("  Recorder didn't exit on SIGINT; sending SIGTERM.")
+                os.killpg(os.getpgid(recorder_proc.pid), signal.SIGTERM)
+                recorder_proc.wait(timeout=5)
+            if recorder_log_f is not None:
+                recorder_log_f.close()
+        else:
+            print("\n  Leaving external recorder running.")
 
         print("  Disconnecting piper...")
         piper.DisconnectPort()
