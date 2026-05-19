@@ -317,11 +317,20 @@ def main():
                     piper.MotionCtrl_2(0x01, 0x01, 100, 0xAD)
                     piper.EnableArm(7)
 
-                # Gripper relay every loop — identical to dual_piper.py. No
-                # try/except: if the SDK raises here, we want a real traceback,
-                # not a silent slave that drifts.
+                # Gripper relay every loop.
+                # The piper SDK parses the master's effort field as signed
+                # int16 (protocol_v2.py:259, ConvertToNegative_16bit signed=True),
+                # but the wire format is uint16. Once the master commands an
+                # effort > 32767 it comes back negative in Python, and the TX
+                # path (ConvertToList_16bit unsigned) raises OverflowError.
+                # Undo the signed reinterpretation, then clamp.
                 mg = piper.GetArmGripperCtrl().gripper_ctrl
-                grip_effort = mg.grippers_effort or 3000
+                raw_effort = mg.grippers_effort
+                if raw_effort < 0:
+                    raw_effort += 0x10000
+                grip_effort = raw_effort if raw_effort > 0 else 3000
+                if grip_effort > 65535:
+                    grip_effort = 65535
                 piper.GripperCtrl(abs(mg.grippers_angle), grip_effort, 0x01, 0)
 
                 # Reuse `mg` for the arm-state read so we don't poll the
